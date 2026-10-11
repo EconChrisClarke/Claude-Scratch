@@ -48,6 +48,11 @@
   .ctlrow label.sercb:hover{border-color:var(--red)}
   .ctlrow label.sercb input{margin:0;accent-color:var(--sw,#374151);cursor:pointer}
   .ctlrow label.sercb.off{color:#9CA3AF}
+  .ctlcheck{display:inline-flex;align-items:center;gap:6px;cursor:pointer;
+    font:600 12.5px/1 'Inter',system-ui,sans-serif;color:#374151;
+    border:1px solid #D9C7CB;border-radius:7px;padding:7px 10px;margin-left:16px}
+  .ctlcheck:hover{border-color:var(--red);color:var(--red)}
+  .ctlcheck input{accent-color:var(--red);margin:0;cursor:pointer}
   body.embed #controls{display:none}
   table.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 </style>
@@ -1276,7 +1281,8 @@ const CHART = {
     }
   ],
   "xMin": 1.5,
-  "xMax": 5.0
+  "xMax": 5.0,
+  "fit": true
 };
 /* CHART_CONFIG_END */
 
@@ -1489,6 +1495,176 @@ function scaleTicks(scale, min, max, target){
   if(scale === 'log')  return logTicks(min, max);
   if(scale === 'sqrt') return sqrtTicks(min, max);
   return ticks(min, max, target);
+}
+
+/* ==========================================================================
+   Line of best fit.
+
+   The fit is computed in the SAME space the axes are drawn in. On a log y-axis
+   that means regressing log10(y), which is a different model with a different
+   slope, a different R2, and a different p — so switching the scale dropdown
+   refits rather than redrawing the old line at a new angle. A fit computed on
+   raw values would be a straight line rendered as a curve, or worse, a curve
+   rendered straight.
+   ======================================================================= */
+/* Regularized incomplete beta, via the Lentz continued fraction. Needed for the
+   t-distribution tail, which is what turns a slope into a p-value. */
+function betacf(a,b,x){
+  const FPMIN=1e-300, EPS=3e-12;
+  const qab=a+b, qap=a+1, qam=a-1;
+  let c=1, d=1-qab*x/qap;
+  if(Math.abs(d)<FPMIN) d=FPMIN;
+  d=1/d; let h=d;
+  for(let m=1;m<=300;m++){
+    const m2=2*m;
+    let aa=m*(b-m)*x/((qam+m2)*(a+m2));
+    d=1+aa*d; if(Math.abs(d)<FPMIN) d=FPMIN;
+    c=1+aa/c; if(Math.abs(c)<FPMIN) c=FPMIN;
+    d=1/d; h*=d*c;
+    aa=-(a+m)*(qab+m)*x/((a+m2)*(qap+m2));
+    d=1+aa*d; if(Math.abs(d)<FPMIN) d=FPMIN;
+    c=1+aa/c; if(Math.abs(c)<FPMIN) c=FPMIN;
+    d=1/d;
+    const del=d*c; h*=del;
+    if(Math.abs(del-1)<EPS) break;
+  }
+  return h;
+}
+function gammaln(x){
+  const c=[76.18009172947146,-86.50532032941677,24.01409824083091,
+           -1.231739572450155,0.1208650973866179e-2,-0.5395239384953e-5];
+  let y=x, tmp=x+5.5;
+  tmp-=(x+0.5)*Math.log(tmp);
+  let ser=1.000000000190015;
+  for(let j=0;j<6;j++) ser+=c[j]/++y;
+  return -tmp+Math.log(2.5066282746310005*ser/x);
+}
+function betai(a,b,x){
+  if(x<=0) return 0;
+  if(x>=1) return 1;
+  const bt=Math.exp(gammaln(a+b)-gammaln(a)-gammaln(b)+a*Math.log(x)+b*Math.log(1-x));
+  return x < (a+1)/(a+b+2) ? bt*betacf(a,b,x)/a : 1-bt*betacf(b,a,1-x)/b;
+}
+/* Two-sided p for a t statistic on df degrees of freedom. */
+function tTest2(t,df){
+  if(!isFinite(t)||df<=0) return NaN;
+  return betai(df/2, 0.5, df/(df+t*t));
+}
+/* Ordinary least squares on already-transformed pairs. */
+function ols(pts){
+  const n=pts.length;
+  if(n<3) return null;
+  let sx=0,sy=0;
+  pts.forEach(p=>{sx+=p[0];sy+=p[1];});
+  const mx=sx/n, my=sy/n;
+  let sxx=0,sxy=0,syy=0;
+  pts.forEach(p=>{const dx=p[0]-mx, dy=p[1]-my; sxx+=dx*dx; sxy+=dx*dy; syy+=dy*dy;});
+  if(sxx<=0||syy<=0) return null;
+  const b=sxy/sxx, a=my-b*mx;
+  const r2=(sxy*sxy)/(sxx*syy);
+  const sse=Math.max(0, syy-b*sxy), df=n-2;
+  const se=Math.sqrt((sse/df)/sxx);
+  /* An exact fit leaves no residual variance, so t is infinite. That is not a
+     failure — it is as significant as a slope can be — but reporting it as
+     "n/a" would read like a broken calculation. */
+  const t = se > 0 ? b/se : (b === 0 ? 0 : Infinity);
+  const p = se > 0 ? tTest2(t, df) : (b === 0 ? 1 : 0);
+  return {a:a,b:b,r2:r2,n:n,df:df,se:se,t:t,p:p};
+}
+
+
+function sig(v, d){
+  if(!isFinite(v)) return '\u2014';
+  if(v === 0) return '0';
+  const mag = Math.floor(Math.log10(Math.abs(v)));
+  const dec = Math.max(0, Math.min(8, (d || 3) - 1 - mag));
+  let out = v.toFixed(dec);
+  if(out.indexOf('.') >= 0) out = out.replace(/0+$/,'').replace(/\.$/,'');
+  return out;
+}
+function pText(p){
+  if(!isFinite(p)) return 'p n/a';
+  if(p < 0.001) return 'p < 0.001';
+  return 'p = ' + p.toFixed(3);
+}
+
+let FITS = [], FITNOTE = '';
+/* Whether the fit is drawn is a viewing decision, not a property of the data,
+   so it lives in runtime state and gets a checkbox. FITMODE remembers whether
+   the config asked for a pooled fit or one per series, so ticking the box
+   restores what the chart was built for rather than a generic default. */
+let SHOWFIT = false, FITMODE = true;
+function fitPossible(){
+  if(CHART.type === 'column' || CHART.type === 'bar') return false;
+  let n = 0;
+  CHART.series.forEach(se => { n += (se.data || []).length; });
+  return n >= 3;
+}
+
+/* Time on the x-axis is fitted in years, not milliseconds: a slope of
+   1.3e-11 per millisecond is arithmetically correct and useless to read. */
+function fitX(raw){
+  const v = xval(raw);
+  return CHART.xType === 'date' ? 1970 + v/3.15576e10 : v;
+}
+function axisTerm(scale, base){
+  if(scale === 'log')  return 'log\u2081\u2080(' + base + ')';
+  if(scale === 'sqrt') return '\u221A' + base;
+  return base;
+}
+
+function computeFits(){
+  FITS = []; FITNOTE = '';
+  if(!SHOWFIT || !fitPossible()) return;
+
+  const S = activeSeries();
+  const tX = tfm(SX), tY = tfm(SY);
+  const perSeries = FITMODE === 'series' && S.length > 1;
+  const groups = perSeries
+    ? S.map((se,i) => ({name:se.name, color:seriesColor(i,se), rows:se.data}))
+    : [{name:null, color:T.ink, rows:[].concat.apply([], S.map(se=>se.data))}];
+
+  const xBase = (CHART.xType === 'date' || CHART.xType === 'year') ? 'year' : 'x';
+  const xTerm = axisTerm(SX, xBase), yTerm = axisTerm(SY, 'y');
+  const lines = [];
+
+  groups.forEach(g => {
+    const pts = [];
+    g.rows.forEach(d => {
+      const xs = tX(fitX(d[0])), ys = tY(+d[1]);
+      if(isFinite(xs) && isFinite(ys)) pts.push([xs, ys]);
+    });
+    const r = ols(pts);
+    if(!r) return;
+    /* The segment is trimmed to the observed data in BOTH directions. Stopping
+       at the x extremes alone is not enough: a steep fit can still run above
+       the highest observation or below the lowest, and a line drawn where no
+       data exists is an extrapolation the reader did not ask for. */
+    const xsv = pts.map(p=>p[0]), ysv = pts.map(p=>p[1]);
+    const dx0 = Math.min.apply(null, xsv), dx1 = Math.max.apply(null, xsv);
+    const dy0 = Math.min.apply(null, ysv), dy1 = Math.max.apply(null, ysv);
+    let lo = dx0, hi = dx1;
+    if(Math.abs(r.b) > 1e-12){
+      const xa = (dy0 - r.a)/r.b, xb = (dy1 - r.a)/r.b;
+      lo = Math.max(lo, Math.min(xa, xb));
+      hi = Math.min(hi, Math.max(xa, xb));
+    } else if(r.a < dy0 || r.a > dy1){
+      return;                      // a flat fit outside the observed band
+    }
+    if(!(hi > lo)) return;         // nothing of the line sits inside the data
+    r.x0 = lo; r.x1 = hi;
+    r.dx0 = dx0; r.dx1 = dx1; r.dy0 = dy0; r.dy1 = dy1;
+    r.color = g.color;
+    FITS.push(r);
+    const eq = yTerm + ' = ' + sig(r.a) + (r.b < 0 ? ' \u2212 ' : ' + ')
+             + sig(Math.abs(r.b)) + '\u00B7' + xTerm;
+    lines.push((g.name ? g.name + ': ' : 'Fit: ') + eq
+      + '  \u00B7  R\u00B2 = ' + r.r2.toFixed(3)
+      + '  \u00B7  slope ' + pText(r.p) + ', n = ' + r.n);
+  });
+
+  if(!lines.length) return;
+  FITNOTE = lines.join('\n');
 }
 
 function wrap(ctx,text,maxW){
@@ -1803,6 +1979,7 @@ function draw(ctx, W, H, P, opts){
 
   const alSpace = axisLabelSpace(P);
   const plotTop = y + T.gap*s*1.9 + alSpace.top;
+  computeFits();
   const footH = footerHeight(ctx, P, L, R);
   const plotBottom = H - safe.b - pad - footH;
 
@@ -1826,8 +2003,15 @@ function draw(ctx, W, H, P, opts){
   const xLog = xSc === 'log', xSqrt = xSc === 'sqrt';
   assertDomain(vals, 'y', ySc);
 
-  const hasMin = CHART.yMin!==null && CHART.yMin!==undefined;
-  const hasMax = CHART.yMax!==null && CHART.yMax!==undefined;
+  /* yMin/yMax are pinned once in the config, but the scale dropdown lets a
+     reader pick log/sqrt/linear live, and a bound that was fine for the
+     config's own scale can be nonsense under another one - 0 is the natural
+     floor for a sqrt axis but log10(0) is -Infinity. assertDomain already
+     rejects bad DATA; this rejects a bad CONFIG BOUND under the scale that is
+     actually active, so a pinned min silently steps aside instead of handing
+     the tick generator an infinite axis to fill. */
+  const hasMin = CHART.yMin!==null && CHART.yMin!==undefined && !(yLog && CHART.yMin<=0);
+  const hasMax = CHART.yMax!==null && CHART.yMax!==undefined && !(yLog && CHART.yMax<=0);
   let vMin = hasMin ? CHART.yMin : Math.min.apply(null,vals);
   let vMax = hasMax ? CHART.yMax : Math.max.apply(null,vals);
   if(yLog){
@@ -1880,15 +2064,19 @@ function draw(ctx, W, H, P, opts){
   const Y = v => pB - (tY(v)-yLo)/(yHi-yLo)*ph;
 
   /* x scale */
-  let X, Xn, xs=[], xSpan=0, xMin=0, xMax=0;
+  let X, Xn, xs=[], xSpan=0, xMin=0, xMax=0, xLo=0;
   if(isCat){
     const n = CHART.categories.length;
     X = i => pL + (i+0.5)*pw/n;
   } else {
     S.forEach(se => se.data.forEach(d => xs.push(xval(d[0]))));
     assertDomain(xs, 'x', xSc);
-    const hasXMin = CHART.xMin!==null && CHART.xMin!==undefined;
-    const hasXMax = CHART.xMax!==null && CHART.xMax!==undefined;
+    /* Same reasoning as the y-axis bound guard above: a pinned xMin/xMax that
+       is fine for the config's own scale can be invalid once the dropdown
+       switches to log, so it steps aside under that scale rather than being
+       handed to the tick generator as -Infinity. */
+    const hasXMin = CHART.xMin!==null && CHART.xMin!==undefined && !(xLog && CHART.xMin<=0);
+    const hasXMax = CHART.xMax!==null && CHART.xMax!==undefined && !(xLog && CHART.xMax<=0);
     xMin = Math.min.apply(null,xs);
     xMax = Math.max.apply(null,xs);
     if(xSqrt && !hasXMin) xMin = 0;
@@ -1903,7 +2091,7 @@ function draw(ctx, W, H, P, opts){
     }
     if(hasXMin) xMin = CHART.xMin;
     if(hasXMax) xMax = CHART.xMax;
-    const xLo = tX(xMin), xHi = tX(xMax);
+    xLo = tX(xMin); const xHi = tX(xMax);
     xSpan = (xHi - xLo) || 1;
     /* Two entry points on purpose. Xn takes an x that has already been through
        xval() — a timestamp, a year number. X takes a raw config value and
@@ -1989,22 +2177,6 @@ function draw(ctx, W, H, P, opts){
       ctx.fillText(xlabel(v, xSpan), Math.min(Math.max(px,pL),pR), xLabY);
     });
     ctx.textAlign='left';
-  }
-
-  /* OLS best-fit line over every visible point (scatter) */
-  if(CHART.type==='scatter'){
-    const q=[]; S.forEach(se=>se.data.forEach(d=>q.push([+d[0],+d[1]])));
-    if(q.length>2){
-      const n=q.length, mx=q.reduce((a,v)=>a+v[0],0)/n, my=q.reduce((a,v)=>a+v[1],0)/n;
-      let sxy=0,sxx=0; q.forEach(v=>{sxy+=(v[0]-mx)*(v[1]-my); sxx+=(v[0]-mx)*(v[0]-mx);});
-      const b=sxy/sxx, a0=my-b*mx;
-      const xa=Math.min.apply(null,q.map(v=>v[0])), xb=Math.max.apply(null,q.map(v=>v[0]));
-      ctx.save();
-      ctx.beginPath(); ctx.rect(pL,pT,pR-pL,pB-pT); ctx.clip();
-      ctx.strokeStyle='#111827'; ctx.lineWidth=Math.max(2,s*2.2); ctx.globalAlpha=0.9;
-      ctx.beginPath(); ctx.moveTo(X(xa),Y(a0+b*xa)); ctx.lineTo(X(xb),Y(a0+b*xb)); ctx.stroke();
-      ctx.restore();
-    }
   }
 
   /* reference lines */
@@ -2194,6 +2366,31 @@ function draw(ctx, W, H, P, opts){
     }
   }
 
+  /* The fit is straight in transformed space, so two endpoints suffice. It is
+     clipped to the plot: an extrapolated tail wandering over the axis labels
+     would imply the model applies out there, which is exactly what a reader
+     should not conclude. */
+  if(FITS.length && !isCat){
+    ctx.save();
+    ctx.beginPath(); ctx.rect(pL, pT, pw, ph); ctx.clip();
+    ctx.setLineDash([6*s, 5*s]);
+    ctx.lineWidth = T.lineW*s*0.60;
+    ctx.lineCap = 'butt';
+    const px = xs2 => pL + (xs2 - xLo)/xSpan*pw;
+    const py = ys2 => pB - (ys2 - yLo)/(yHi - yLo)*ph;
+    FITS.forEach(f => {
+      ctx.strokeStyle = f.color;
+      ctx.globalAlpha = 0.85;
+      ctx.beginPath();
+      ctx.moveTo(px(f.x0), py(f.a + f.b*f.x0));
+      ctx.lineTo(px(f.x1), py(f.a + f.b*f.x1));
+      ctx.stroke();
+    });
+    ctx.globalAlpha = 1;
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
   /* Annotations. The requested offset is treated as a preference, not an
      instruction: if the label would land on top of the data it flips to a free
      side. Text is then painted with a background-coloured halo, because even a
@@ -2212,6 +2409,24 @@ function draw(ctx, W, H, P, opts){
     }
   });
   if(!obstacles.length) HIT.forEach(h=>obstacles.push(h));
+
+  /* An annotation's dot has no colour of its own to reach for - it is marking
+     an existing point, not introducing a new series - so it should read as
+     that point's own legend colour, not a fixed house colour that can clash
+     with (or misidentify) whichever series it actually sits on. Matched by
+     coordinate rather than carrying an explicit series reference, since that
+     is all an annotation config already gives us. Falls back to T.ink, a
+     neutral that doesn't claim a series identity, when no point matches. */
+  function annotationColor(a){
+    for(let i=0;i<S.length;i++){
+      const se = S[i];
+      for(const d of se.data){
+        if(d[0]===a.x && (+d[1])===(+a.y))
+          return emphasise(seriesColor(i, se), isHi(se.name, i), true);
+      }
+    }
+    return S.length===1 ? emphasise(seriesColor(0, S[0]), isHi(S[0].name, 0), true) : T.ink;
+  }
 
   (CHART.annotations||[]).forEach(a=>{
     const ax = isCat ? X(CHART.categories.indexOf(a.x)) : X(a.x);
@@ -2293,7 +2508,7 @@ function draw(ctx, W, H, P, opts){
     lines.forEach((ln,i)=> ctx.fillText(ln, tx, ty + i*lh));
     ctx.textAlign = 'left';
 
-    ctx.fillStyle = T.red;
+    ctx.fillStyle = annotationColor(a);
     ctx.beginPath(); ctx.arc(ax, ay, T.dotR*s*0.75, 0, 6.284); ctx.fill();
   });
 
@@ -2379,7 +2594,16 @@ function footerLines(ctx, P, L, R){
   if(CHART.handle && !logoHeight(P)) parts.push(CHART.handle);
   return {
     src:  (parts.length && showFooterText(P)) ? wrap(ctx, parts.join('   ·   '), room) : [],
-    note: (CHART.note && showFooterText(P)) ? wrap(ctx, CHART.note, room) : [],
+    /* The note carries the fit statistics as well as the author's own note.
+       Both wrap; neither is truncated. */
+    note: showFooterText(P) ? (function(){
+      let out = [];
+      if(CHART.note) out = out.concat(wrap(ctx, CHART.note, room));
+      if(FITNOTE) FITNOTE.split('\n').forEach(function(t){
+        out = out.concat(wrap(ctx, t, room));
+      });
+      return out;
+    })() : [],
     lh:   T.szFoot*s*1.45,
     room: room
   };
@@ -2721,6 +2945,7 @@ function copyText(){
   out.push('<p class="ct-head">' + esc(CHART.headline) + '</p>');
   if(subheadText()) out.push('<p>' + esc(subheadText()) + '</p>');
   if(CHART.note) out.push('<p>' + esc(CHART.note) + '</p>');
+  if(FITNOTE) out.push('<p>' + esc(FITNOTE).replace(/\n/g,'<br>') + '</p>');
   const src = [];
   if(CHART.source) src.push('Source: ' + esc(CHART.source));
   if(CHART.sourceUrl) src.push('<a href="' + esc(CHART.sourceUrl) + '">'
@@ -2832,6 +3057,9 @@ function buildAxes(){
   const yLab = parts.length ? '<span class="ctllab inline">Y scale</span>'
                             : '<span class="ctllab">Y scale</span>';
   parts.push(yLab + sel('axsy', SCALE_LABELS, SY));
+  if(fitPossible())
+    parts.push('<label class="ctlcheck"><input type="checkbox" id="axfit"'
+      + (SHOWFIT ? ' checked' : '') + '> Line of best fit</label>');
   parts.push('<span class="ctlwarn" id="axwarn"></span>');
 
   z.innerHTML = parts.join('');
@@ -2861,6 +3089,11 @@ function buildAxes(){
     SMOOTH = +sm.value || 1;
     const hit = smooth.filter(o => o[1] === SMOOTH)[0];
     SMOOTH_LABEL = hit ? hit[0] : '';
+    render();
+  });
+  const fitBox = document.getElementById('axfit');
+  if(fitBox) fitBox.addEventListener('change', function(){
+    SHOWFIT = fitBox.checked;
     render();
   });
 }
@@ -2906,6 +3139,7 @@ function chartText(){
   if(CHART.headline) out.push(CHART.headline);
   if(subheadText()) out.push(subheadText());
   if(CHART.note) out.push('', CHART.note);
+  if(FITNOTE) out.push('', FITNOTE);
   const src = [];
   if(CHART.source) src.push('Source: ' + CHART.source);
   if(CHART.sourceUrl) src.push(CHART.sourceUrl);
@@ -3041,6 +3275,8 @@ function boot(){
   cv.style.cursor = 'pointer';
   SX = CHART.xScale || 'linear';
   SY = CHART.yScale || 'linear';
+  SHOWFIT = !!CHART.fit;
+  FITMODE = CHART.fit === 'series' ? 'series' : true;
   (CHART.hidden || []).forEach(n => HIDDEN.add(n));   // config: series off at load
   buildZoom();
   buildAxes();
