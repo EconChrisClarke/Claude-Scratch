@@ -88,10 +88,10 @@
 const CHART = {
   "type": "scatter",
   "headline": "When gas prices rise, presidential approval tends to fall, but the link is loose",
-  "subhead": "Monthly average presidential approval vs. US regular gasoline price (nominal), Oct 2006 to Sep 2026",
-  "source": "EIA via FRED (GASREGM); Gallup via American Presidency Project, UC Santa Barbara",
+  "subhead": "Monthly average presidential approval vs. US regular gasoline price (nominal), Oct 2006 to Jul 2026",
+  "source": "EIA via FRED (GASREGM); Gallup via American Presidency Project, UC Santa Barbara; Pew Research Center",
   "sourceUrl": "https://www.presidency.ucsb.edu/statistics/data/presidential-job-approval",
-  "note": "Each dot is a month. Gallup polls through Dec 2025; 2026 uses other pollsters.",
+  "note": "Each dot is a month. Gallup through Dec 2025, Pew for 2026.",
   "xType": "number",
   "xLabel": "Regular gasoline price ($ per gallon)",
   "yLabel": "Presidential approval (%)",
@@ -105,7 +105,7 @@ const CHART = {
   },
   "series": [
     {
-      "name": "Gallup",
+      "name": "Gallup (through 2025)",
       "data": [
         [
           2.245,
@@ -1255,52 +1255,22 @@ const CHART = {
       ]
     },
     {
-      "name": "2026, other pollsters",
+      "name": "Pew (2026)",
       "data": [
         [
           2.809,
-          39,
+          37.0,
           "2026-01"
         ],
         [
-          2.908,
-          36.7,
-          "2026-02"
-        ],
-        [
-          3.638,
-          37,
-          "2026-03"
-        ],
-        [
           4.103,
-          35,
+          34.0,
           "2026-04"
         ],
         [
-          4.479,
-          35.2,
-          "2026-05"
-        ],
-        [
-          4.05,
-          35.8,
-          "2026-06"
-        ],
-        [
           3.932,
-          35.5,
+          34.0,
           "2026-07"
-        ],
-        [
-          4.058,
-          35,
-          "2026-08"
-        ],
-        [
-          4.355,
-          35.8,
-          "2026-09"
         ]
       ]
     }
@@ -2019,6 +1989,22 @@ function draw(ctx, W, H, P, opts){
       ctx.fillText(xlabel(v, xSpan), Math.min(Math.max(px,pL),pR), xLabY);
     });
     ctx.textAlign='left';
+  }
+
+  /* OLS best-fit line over every visible point (scatter) */
+  if(CHART.type==='scatter'){
+    const q=[]; S.forEach(se=>se.data.forEach(d=>q.push([+d[0],+d[1]])));
+    if(q.length>2){
+      const n=q.length, mx=q.reduce((a,v)=>a+v[0],0)/n, my=q.reduce((a,v)=>a+v[1],0)/n;
+      let sxy=0,sxx=0; q.forEach(v=>{sxy+=(v[0]-mx)*(v[1]-my); sxx+=(v[0]-mx)*(v[0]-mx);});
+      const b=sxy/sxx, a0=my-b*mx;
+      const xa=Math.min.apply(null,q.map(v=>v[0])), xb=Math.max.apply(null,q.map(v=>v[0]));
+      ctx.save();
+      ctx.beginPath(); ctx.rect(pL,pT,pR-pL,pB-pT); ctx.clip();
+      ctx.strokeStyle='#111827'; ctx.lineWidth=Math.max(2,s*2.2); ctx.globalAlpha=0.9;
+      ctx.beginPath(); ctx.moveTo(X(xa),Y(a0+b*xa)); ctx.lineTo(X(xb),Y(a0+b*xb)); ctx.stroke();
+      ctx.restore();
+    }
   }
 
   /* reference lines */
