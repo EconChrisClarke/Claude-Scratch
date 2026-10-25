@@ -17,7 +17,8 @@ def frac2date(f):
 def date2frac(d):
     y=d.year; return y+(d-dt.date(y,1,1)).days/(366 if y%4==0 else 365)
 out={}
-end=dt.date(2026,10,22); start=end-dt.timedelta(days=365)
+end=dt.date(2026,10,22); START=dt.date(2018,1,1)
+STEP={'France':4,'Germany':4,'United States':7,'United Kingdom':7}
 for n,(f,ytop,vtop,y0,t) in C.items():
     a=np.array(Image.open(P+f+"-image.jpg").convert("RGB")).astype(int)
     m=(abs(a[:,:,0]-65)<45)&(abs(a[:,:,1]-170)<45)&(abs(a[:,:,2]-210)<45)
@@ -27,23 +28,32 @@ for n,(f,ytop,vtop,y0,t) in C.items():
     b=xmax-k*date2frac(end)  # anchor: last drawn pixel = 22 Oct 2026; scale from year ticks
     print(n,'px/yr',round(k,1))
     # anchor the last drawn pixel to Oct 22 2026 by shifting the date axis only if close
-    def val(x0):
-        cols=[int(round(x0))]
-        ys=np.concatenate([np.nonzero(m[:,c])[0] for c in cols if 0<=c<m.shape[1]])
+    def colstat(c):
+        ys=np.nonzero(m[:,c])[0]
         if len(ys)==0: return None
-        # steep sections: use midpoint of extent when thick, else mean
-        yy=ys.mean()
-        return (y0-yy)/(y0-ytop)*vtop
+        f=lambda y:(y0-y)/(y0-ytop)*vtop
+        return f(ys.mean()), f(ys.min()+2.5), f(ys.max()-2.5)   # centre, top of stroke, bottom of stroke
+    def val(x0):
+        c=int(round(x0)); cs=colstat(c)
+        if cs is None: return None
+        mid,top,bot=cs
+        l,r=colstat(c-1),colstat(c+1)
+        if l and r and c<xmax-8:  # (not on the steep final climb) sharp one-column peaks and troughs: keep the extreme, not the vertical mean
+            tol=2*vtop/(y0-ytop)*3
+            if top>max(l[0],r[0])+tol: return top
+            if bot<min(l[0],r[0])-tol: return bot
+        return mid
     rows=[]
-    d=start
+    first=frac2date((xs.min()-b)/k)  # first drawn pixel -> date
+    d=max(START,first); print(n,'series starts',d)
     while d<=end-dt.timedelta(days=2):
         x=k*date2frac(d)+b
         if x<=xmax+1:
             v=val(min(x,xmax))
             if v is not None: rows.append([d.isoformat(),round(v,1)])
-        d+=dt.timedelta(days=3)
+        d+=dt.timedelta(days=STEP[n])
     # always include the last observation (22 Oct) at the final drawn column
     v=val(xmax); rows.append([end.isoformat(),round(v,1)])
     out[n]=rows
-json.dump(out,open("/tmp/claude-0/-home-user-Claude-Scratch/63be7e93-2818-565d-8427-55f1acd09606/scratchpad/cds.json","w"))
+json.dump(out,open("/tmp/cds.json","w"))
 for n,r in out.items(): print(n,len(r),r[0],r[len(r)//2],r[-3:])
